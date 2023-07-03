@@ -1,0 +1,3324 @@
+
+#Faster off
+#Door Open (arrive)
+#Buffer distances
+
+#Light for auto moves allowed?
+
+#Pin mappings
+# G            # TXD                  # EN                        # G
+#@ 27 tm1638   # RXD                  # S_VP / 36                 # G*
+#@ 25 tm1638   # 22 i2c_a SDA         #@ 26                       # S_VN
+#@ 32 tm1638   # 21 i2c_a SCL         #@ 18 TX_pendant_green      #[i] 35
+# 12           #@ 17                  #@ 19 RX_pendant_blue       #@ 33 button_w_led
+#@ 04 #RTTL    #@ 16 RX_robot_blue    #@ 23                       #[i] NTROL
+# 00           # G                    #@ 5                        # 14
+# 02           # 5v0 / vIN            # 3v3                       # 3v3*
+# xx           # 15                   # 13                        # 5vF*
+
+substitutions:
+  transition_lights: 10ms
+  transition_through_lights: 50ms
+  home_delay: 1s
+
+
+esphome:
+  friendly_name: Scorby
+  name: scorbot-quinled
+  comment: Scorbot ER iii w Quinled ESP32
+  platform: ESP32
+  board: mhetesp32devkit #Quinled pinout: https://quinled.info/quinled-esp32-board-details/
+  on_boot:
+    - priority: -100
+      then:
+        #Not dependant on scorby controller being online
+        - script.execute: zero_last_movement_amount_tracker
+        - script.execute: zero_cumulative_movement_amount_tracker
+        - script.execute: set_all_button_states_to_off      
+        - wait_until: #Wait until API is connected
+            condition:
+               api.connected:
+            timeout: 20s
+        #Turn on contoller power
+        - switch.turn_on: power_control_box_switch 
+
+  on_shutdown: 
+    - priority: -400
+      then:
+        - if:
+            condition:
+                switch.is_on: power_control_box_switch
+            then:
+              - switch.turn_off: power_control_box_switch
+              - delay: 500ms
+        - script.wait: safe_shutdown            
+        - wait_until: #Wait until power is off.
+            condition:
+                binary_sensor.is_off: robot_power_is_on
+            timeout: 20s
+        - delay: 1s #Give a few other things a second to complete.
+
+api:  
+ota: 
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+logger:
+  # baud_rate: 0
+  level: VERBOSE
+  logs:
+    light: INFO
+    ledc.output: INFO
+    vl53l0x: INFO
+    
+display:
+#TM1638:
+  # https://esphome.io/components/display/tm1638.html
+  # 5V
+    platform: tm1638
+    id: tm1638_display
+    stb_pin: 32 #White Wire
+    clk_pin: 25 #Brown Wire
+    dio_pin: 27 #Light Purple Wire
+    intensity: 1
+    update_interval: never
+    lambda: |-
+      it.print("        "); //Clear existing
+      it.printf(0, id(screen_message).state.c_str()); //Screen messages pushed from other locations
+
+#Buzzer  
+rtttl:
+  output: rtttl_out
+  on_finished_playback:
+    - logger.log: 'Song ended!'
+      
+i2c: 
+#https://esphome.io/components/i2c.html
+#Put 5v and 3v on different bus.
+#VL53L0X: 3V https://esphome.io/components/sensor/vl53l0x.html
+#PCA9685: 5V https://esphome.io/components/output/pca9685.html
+  - id: i2c_3v
+    sda: 21
+    scl: 22
+    scan: true
+  - id: i2c_5v #pca9685
+    sda: 23
+    scl: 5
+    scan: true
+    frequency: 100kHz
+
+pca9685:
+  frequency: 1000 #Must be in range from 24Hz to 1525.88Hz. Default 1000Hz.
+  external_clock_input: false
+  i2c_id: i2c_5v
+
+output:
+#Rttl buzzer
+  - platform: ledc
+    pin: GPIO04
+    id: rtttl_out
+#pca9685 outputs
+  - id: pca9685_output1
+    platform: pca9685
+    channel: 0
+  - id: pca9685_output2
+    platform: pca9685
+    channel: 1
+  - id: pca9685_output3
+    platform: pca9685
+    channel: 2
+  - id: pca9685_output4
+    platform: pca9685
+    channel: 3
+  - id: pca9685_output5
+    platform: pca9685
+    channel: 4
+  - id: pca9685_output6
+    platform: pca9685
+    channel: 5
+  - id: pca9685_output7
+    platform: pca9685
+    channel: 6
+
+light:
+#Retro LED Rows. Indexing a bit misaligned.
+  - platform: monochromatic
+    name: LED Row 4 Orange
+    id: led_row_4
+    output: pca9685_output1
+    default_transition_length: ${transition_lights}
+    internal: true
+  - platform: monochromatic
+    name: LED Row 5 Blue
+    id: led_row_5
+    output: pca9685_output2
+    default_transition_length: ${transition_lights}
+    internal: true
+  - platform: monochromatic
+    name: LED Row 6 Multi
+    id: led_row_6
+    output: pca9685_output3
+    default_transition_length: ${transition_lights}
+    internal: true
+  - platform: monochromatic
+    name: LED Row 3 Amber
+    id: led_row_3
+    output: pca9685_output4
+    default_transition_length: ${transition_lights}
+    internal: true
+  - platform: monochromatic
+    name: LED Row 2 Green
+    id: led_row_2
+    output: pca9685_output5
+    default_transition_length: ${transition_lights}
+    internal: true
+  - platform: monochromatic
+    name: LED Row 1 RED
+    id: led_row_1
+    output: pca9685_output6
+    default_transition_length: ${transition_lights}
+    internal: true
+  - platform: monochromatic
+    name: LED Head Torch
+    id: led_head_torch
+    output: pca9685_output7
+    icon: mdi:flashlight
+    default_transition_length: ${transition_lights}
+    on_turn_on:
+      - light.turn_on:
+          id: led_head_torch
+          brightness: 70%
+
+sensor:
+#Robot rosition tracking (e.g tracks distance from "home")
+#On value, update the "total movement trackers"
+#Last Movement amount (requested)
+  - platform: template
+    name: "M1 Last Movement Amount"
+    id: m1_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m1_cumulative_movement_amount).publish_state(x + id(m1_cumulative_movement_amount).state);
+    internal: true
+  - platform: template
+    name: "M2 Last Movement Amount"
+    id: m2_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m2_cumulative_movement_amount).publish_state(x + id(m2_cumulative_movement_amount).state);
+    internal: true
+  - platform: template
+    name: "M3 Last Movement Amount"
+    id: m3_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m3_cumulative_movement_amount).publish_state(x + id(m3_cumulative_movement_amount).state);
+    internal: true
+  - platform: template
+    name: "M4 Last Movement Amount"
+    id: m4_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m4_cumulative_movement_amount).publish_state(x + id(m4_cumulative_movement_amount).state);
+    internal: true
+  - platform: template
+    name: "M5 Last Movement Amount"
+    id: m5_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m5_cumulative_movement_amount).publish_state(x + id(m5_cumulative_movement_amount).state);
+    internal: true
+  - platform: template
+    name: "M6 Last Movement Amount"
+    id: m6_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m6_cumulative_movement_amount).publish_state(x + id(m6_cumulative_movement_amount).state);
+    internal: true
+  - platform: template
+    name: "M7 Last Movement Amount"
+    id: m7_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m7_cumulative_movement_amount).publish_state(x + id(m7_cumulative_movement_amount).state);
+    internal: true
+  - platform: template
+    name: "M8 Last Movement Amount"
+    id: m8_last_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            id(m8_cumulative_movement_amount).publish_state(x + id(m8_cumulative_movement_amount).state);
+    internal: true
+
+     
+#Track cumulative motor movement amount commands
+#Update the "return home uart command on value"
+  - platform: template
+    name: "M1 Cumulative Movement Amount"
+    id: m1_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+    internal: true
+  - platform: template
+    name: "M2 Cumulative Movement Amount"
+    id: m2_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+    internal: true
+  - platform: template
+    name: "M3 Cumulative Movement Amount"
+    id: m3_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - component.update: esp_return_to_base_uart_command
+    internal: true
+  - platform: template
+    name: "M4 Cumulative Movement Amount"
+    id: m4_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - component.update: esp_return_to_base_uart_command
+    internal: true
+  - platform: template
+    name: "M5 Cumulative Movement Amount"
+    id: m5_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - component.update: esp_return_to_base_uart_command
+    internal: true
+  - platform: template
+    name: "M6 Cumulative Movement Amount"
+    id: m6_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - component.update: esp_return_to_base_uart_command
+    internal: true
+  - platform: template
+    name: "M7 Cumulative Movement Amount"
+    id: m7_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - component.update: esp_return_to_base_uart_command
+    internal: true
+  - platform: template
+    name: "M8 Cumulative Movement Amount"
+    id: m8_cumulative_movement_amount
+    update_interval: never
+    on_value:
+      then:
+        - component.update: esp_return_to_base_uart_command
+    internal: true
+    
+    
+#Import power from smart switch
+  - platform: homeassistant
+    name: "Imported Power"
+    id: imported_power
+    entity_id: sensor.scorby_power_controller_power
+    unit_of_measurement: W
+    internal: true
+    on_value:
+      then: #Update the movemnent status sensor. This isn't a very responsive/reliable method.
+        - lambda: |-
+            if (x < 3) { return id(robot_status).publish_state("Off");}
+            else if (x < 17) { return id(robot_status).publish_state("Idle");}
+            else if (x >=17) { return id(robot_status).publish_state("Moving");}
+            else { return id(robot_status).publish_state("Other");}
+    
+  - platform: uptime
+    name: "Uptime Sensor"
+    id: uptime_sensor
+    update_interval: 5s
+    entity_category: diagnostic
+    
+#############################################
+#Time of Flight  / Distance
+#############################################
+#VCC connects to 3V3 | https://esphome.io/components/sensor/vl53l0x.html
+  - platform: vl53l0x 
+    i2c_id: i2c_3v
+    name: "Distance ToF"    
+    id: distance_tof
+    icon: mdi:arrow-expand-horizontal
+    entity_category: diagnostic
+    address: 0x29
+    update_interval: 1s
+    long_range: true
+    filters:
+      - multiply: 100 #Convert to cm
+      # - median: #Use a moving median for spike smoothing.
+          # window_size: 3
+          # send_every: 3
+      - delta: 1.0
+    unit_of_measurement: "cm"
+    accuracy_decimals: 0 #Keep it simple. To the cm.        
+
+binary_sensor:
+#Binary sensors to check for supervision.
+#Import HA DND
+
+##################################
+#Presence
+##################################
+  - platform: homeassistant
+    name: "DND"
+    id: "dnd"
+    entity_id: input_boolean.dnd_mode
+    icon: mdi:volume-off
+    publish_initial_state: true
+    internal: true
+    
+  - platform: homeassistant
+    name: "Inbound Person"
+    internal: false 
+    id: "last_front_door_movement_likely_inbound"
+    entity_id:  binary_sensor.last_front_door_movement_likely_inbound
+    icon: mdi:door
+    publish_initial_state: true
+    
+#M Here.
+  - platform: homeassistant
+    name: "Mahko Here"
+    internal: false 
+    id: "mahko_here"
+    entity_id: binary_sensor.mahko_is_here
+    icon: mdi:alpha-m-circle
+    publish_initial_state: true
+# #H Here.
+  # - platform: homeassistant
+    # name: "Hannah Here"
+    # internal: false 
+    # id: "hannah_here"
+    # entity_id: binary_sensor.hannah_is_here
+    # icon: mdi:alpha-h-circle
+    # publish_initial_state: true
+    
+# #People Here
+  # - platform: homeassistant
+    # name: "People Here"
+    # internal: false 
+    # id: "people_here"
+    # entity_id: binary_sensor.people_home
+    # icon: mdi:home-import-outline
+    # publish_initial_state: true
+    # on_press:
+
+  - platform: homeassistant
+    name: "Front Door Open"
+    internal: false 
+    id: "front_door_open"
+    entity_id: binary_sensor.door_window_sensor_158d00031b360f
+    icon: mdi:door
+    publish_initial_state: true
+   
+  
+##################################
+#Presence based automations
+##################################
+#Auto actions only allowed if supervised, not in DND mode, and hardware button enabled.
+  - platform: template
+    id: auto_moves_allowed
+    icon: mdi:auto-mode
+    name: Auto Moves Allowed
+    lambda: |-
+      return
+        id(mahko_here).state && 
+        (not id(dnd).state) &&
+        id(button_w_led).state
+      ;
+
+#Someone arrives
+  - platform: template
+    id: arrival_suss_trigger
+    entity_category: diagnostic
+    icon: mdi:motion-sensor
+    name: Arrival Suss Trigger
+    lambda: |-
+      return
+        id(last_front_door_movement_likely_inbound).state
+      ;
+    on_press:
+      - script.execute: sussing_you_out_script
+    filters:
+      - delayed_off: 2min
+
+  - platform: template
+    id: someone_is_detected
+    entity_category: diagnostic
+    icon: mdi:motion-sensor
+    name: Someone Is Detected
+    lambda: |-
+      if (id(distance_tof).state >= id(someone_is_close_threshold).state) 
+          {return true;} 
+      else 
+          {return false;}
+    filters:
+      - delayed_on: 1s
+      - delayed_off: 2min
+    on_press:
+      - script.execute: someone_is_detected_script
+
+  - platform: template
+    id: someone_is_close_binary
+    entity_category: diagnostic
+    icon: mdi:motion-sensor
+    name: Someone Is Close
+    lambda: |-
+      if (id(distance_tof).state  < id(someone_is_close_threshold).state)
+          {return true;} 
+      else 
+          {return false;}
+    filters:
+      - delayed_on: 3s
+      - delayed_off: 2min
+    on_press:
+      - script.execute: someone_is_close_kiss_script
+      
+
+  - platform: template
+    id: ready_for_action
+    name: Ready for Action 
+    icon: mdi:motion-play
+    lambda: |-
+      return
+        id(esp_is_in_control).state &&
+        id(robot_power_is_on).state &&
+        id(interrupt_mode_switch).state
+      ;
+    on_press:
+      - switch.turn_on: TM1638Led2
+    on_release:
+      - switch.turn_off: TM1638Led2
+ 
+  # - platform: template
+    # id: a_routine_is_running
+    # name: A Routine Is Running    
+    # lambda: |-
+      # return
+        # id(esp_is_in_control).state &&
+        # id(robot_power_is_on).state &&
+        # id(interrupt_mode_switch).state
+      # ;
+    # on_press:
+      # - switch.turn_on: TM1638Led2
+    # on_release:
+      # - switch.turn_off: TM1638Led2
+
+
+#Is the esp port the active port (rather than pendant)? Set from other sensors.
+  - platform: template
+    id: esp_is_in_control
+    name: ESP Is In Control
+    icon: mdi:car-esp
+    on_press:
+      - script.execute: configure_controller_settings #Once in control and communicating, configure settings.
+      
+#Scorby Power Status
+  - platform: template
+    id: robot_power_is_on
+    name: Robot Power Is On
+    icon: mdi:power
+    publish_initial_state: true
+    lambda: return id(imported_power).state >= 13; #Based on idle power
+    on_press:
+      #Not dependant on scorby controller being online
+      - switch.turn_on: TM1638Led1
+      - script.execute: zero_last_movement_amount_tracker
+      - script.execute: zero_cumulative_movement_amount_tracker
+      - script.execute: set_all_button_states_to_off
+      - delay: 3s #REQUIRED for Robot Controller to finsh booting!
+      - script.execute: make_esp_master_controller_script
+    on_release:
+      - script.execute: rtttl_single_scale_down
+      - switch.turn_off: TM1638Led1
+
+  - platform: template
+    id: robot_is_moving
+    icon: mdi:motion
+    name: Robot Is Moving #Power based heuristic.
+    lambda: return id(imported_power).state >= 17; #Based on moving power
+    
+  - platform: copy
+    source_id: robot_is_moving
+    name: "Power Alert"
+    icon: mdi:flash-alert
+    id: power_alert
+    filters:
+      - delayed_on: 60s #If there's a high power draw for more than x seconds, turn off the controller.
+    on_press:
+      then:
+        - switch.turn_off: power_control_box_switch
+        - logger.log: 'High Power for too long! Turning off robot!!!'
+    
+  - platform: homeassistant
+    id: imported_power_plug_is_on
+    name: Power Plug Is On
+    entity_id: binary_sensor.scorby_power_controller_power_is_on
+    internal: true
+    entity_category: diagnostic
+  - platform: homeassistant
+    id: imported_power_auto_off_soon
+    icon: mdi:timer-sand-complete
+    name: Auto Off Soon
+    entity_id: binary_sensor.scorby_power_controller_auto_off_soon
+    internal: true
+    
+      
+  - platform: template
+    id: motion_about_to_stop_3
+    name: Motion About to Stop
+    internal: true
+    on_press:
+      - delay: 1s
+      - lambda: id(motion_about_to_stop_3).publish_state(false); 
+
+  - platform: template
+    id: motor_movements_done_4
+    name: Motor Movements Done
+    internal: true
+    on_press:
+      - delay: 1s
+      - lambda: id(motor_movements_done_4).publish_state(false); 
+
+
+  - platform: template
+    id: robot_is_home
+    name: Robot Is Home
+    icon: mdi:home
+    device_class: PRESENCE
+    lambda: |-
+      return
+        id(limit_switch_1).state &&
+        id(limit_switch_2).state &&
+        id(limit_switch_3).state &&
+        id(limit_switch_4).state &&
+        id(limit_switch_5).state
+      ;
+    on_press:
+      - switch.turn_on: TM1638Led4
+    on_release:
+      - switch.turn_off: TM1638Led4
+
+  - platform: template
+    id: robot_is_time_travelling
+    name: Robot Is Time Travelling
+    icon: mdi:home
+    device_class: LIGHT
+    lambda: |-
+      return
+        id(esp_return_to_base_uart_command).state == "1m-350\\r2m-1200\\r3m-250\\r4m-340\\r5m340\\r8m0\\r"
+      ;
+    
+#Limit Switches
+  - platform: template
+    id: limit_switch_1
+    name: L1 Is Base Home
+    icon: mdi:home-search
+    device_class: PRESENCE
+  - platform: template
+    id: limit_switch_2
+    name: L2 Is Shoulder Home
+    icon: mdi:home-search
+    device_class: PRESENCE
+  - platform: template
+    id: limit_switch_3
+    name: L3 Is Elbow Home
+    icon: mdi:home-search
+    device_class: PRESENCE
+  - platform: template
+    id: limit_switch_4
+    name: L5 Is Wrist Pitch Home
+    icon: mdi:home-search
+    device_class: PRESENCE    
+  - platform: template
+    id: limit_switch_5
+    name: L5 Is Wrist Rotate Home
+    icon: mdi:home-search
+    device_class: PRESENCE
+
+  - platform: template
+    id: limit_switch_6
+    name: L6 Is Gripper Home
+    icon: mdi:home-search
+    device_class: PRESENCE
+  - platform: template
+    id: limit_switch_7
+    name: L7 Is Limit Switch 7 Home
+    icon: mdi:home-search
+    device_class: PRESENCE
+  - platform: template
+    id: limit_switch_8
+    name: L8 Is Limit Switch 8 Home
+    icon: mdi:home-search
+    device_class: PRESENCE
+
+  - platform: template
+    id: input_1
+    name: I1 Input
+    icon: mdi:electric-switch
+    internal: true
+  - platform: template
+    id: input_2
+    name: I2 Input
+    icon: mdi:electric-switch
+    internal: true
+  - platform: template
+    id: input_3
+    name: I3 Input
+    icon: mdi:electric-switch
+    internal: true
+  - platform: template
+    id: input_4
+    name: I4 Input
+    icon: mdi:electric-switch
+    internal: true
+  - platform: template
+    id: input_5
+    name: I5 Input
+    icon: mdi:electric-switch
+    internal: true
+  - platform: template
+    id: input_6
+    name: I6 Input
+    icon: mdi:electric-switch
+    internal: true
+  - platform: template
+    id: input_7
+    name: I7 Input
+    icon: mdi:electric-switch
+    internal: true
+  - platform: template
+    id: input_8
+    name: I8 Input
+    icon: mdi:electric-switch
+    internal: true
+
+
+#Latching Button with LED. Read only.
+  #LED wired to be on if switch closed.
+  #Power From 3V
+  - platform: gpio
+    name: "Auto Moves Allowed"
+    id: button_w_led
+    pin: 
+      number: GPIO33 #Orange Wire
+      mode: INPUT_PULLDOWN
+    on_press:
+     then:
+       - script.execute: rtttl_single_high_beep
+    on_release:
+     then:
+       - script.execute: rtttl_single_high_beep
+
+#tm1638 Buttons/LEDs
+#Button 1: Toggle Power
+  - platform: tm1638
+    name: "Button 1 Toggle Power"
+    id: TM1638Button1
+    publish_initial_state: true
+    internal: true
+    key: 0
+    filters:
+      - delayed_on: 10ms
+    on_press:
+     then:
+        - switch.toggle: power_control_box_switch
+        - script.execute: rtttl_single_high_beep
+        
+#Button 2: Nothing
+  - platform: tm1638
+    name: "Button 2 Nothing"
+    id: TM1638Button2
+    internal: true
+    key: 1
+    filters:
+      - delayed_on: 10ms
+    # on_press:
+     # then:
+        # - switch.toggle: make_esp_master_switch
+        # - script.execute: rtttl_single_high_beep
+        
+#Button 3: Toggle Controller
+  - platform: tm1638
+    name: "Button 3 Toggle Controller"
+    id: TM1638Button3
+    internal: true
+    key: 2
+    filters:
+      - delayed_on: 10ms
+    on_press:
+     then:
+        - script.stop: home_search_all_script
+        - script.stop: someone_is_detected_script
+        - script.stop: someone_is_close_kiss_script
+        - script.stop: sussing_you_out_script
+        - script.stop: show_off_script
+        - switch.toggle: make_esp_master_switch
+        - script.execute: rtttl_single_high_beep
+        
+
+#Button 4: Search Home
+  - platform: tm1638
+    name: "Button 4 Home Search"
+    id: TM1638Button4
+    internal: true
+    key: 3
+    filters:
+      - delayed_on: 10ms
+    on_press:
+     then:
+        - script.stop: home_search_all_script
+        - script.stop: someone_is_detected_script
+        - script.stop: someone_is_close_kiss_script
+        - script.stop: sussing_you_out_script
+        - script.stop: show_off_script
+        - script.execute: rtttl_single_high_beep
+        - script.execute: home_search_all_script
+    on_release:
+     then:
+        - switch.turn_off: TM1638Led4
+
+#Button 5: Return to Starting Pos
+  - platform: tm1638
+    name: "Button 5 Return To Start"
+    id: TM1638Button5
+    internal: true
+    key: 4
+    filters:
+      - delayed_on: 10ms
+    on_press:
+     then:
+        - script.stop: home_search_all_script
+        - script.stop: someone_is_detected_script
+        - script.stop: someone_is_close_kiss_script
+        - script.stop: sussing_you_out_script
+        - script.stop: show_off_script
+        - switch.turn_on: TM1638Led5
+        - script.execute: rtttl_single_high_beep
+        - button.press: esp_scorbot_return_to_base_command
+    on_release:
+     then:
+        - switch.turn_off: TM1638Led5
+#Button 6
+  - platform: tm1638
+    name: "Button 6 Toggle Headlamp"
+    id: TM1638Button6
+    internal: true
+    key: 5
+    filters:
+      - delayed_on: 10ms
+    on_press:
+     then:
+        - script.execute: rtttl_single_high_beep
+        - switch.toggle: light_on_time_traveller_light
+
+#Button 7
+  - platform: tm1638
+    name: "Button 7 Show Off"
+    id: TM1638Button7
+    internal: true
+    icon: mdi:rocket-launch
+    key: 6
+    filters:
+      - delayed_on: 10ms
+    on_press:
+     then:
+        - script.stop: home_search_all_script
+        - script.stop: someone_is_detected_script
+        - script.stop: someone_is_close_kiss_script
+        - script.stop: sussing_you_out_script
+        - switch.turn_on: TM1638Led7
+        - script.execute: rtttl_single_high_beep
+        - button.press: show_off_button
+    on_release:
+     then:
+        - switch.turn_off: TM1638Led7
+#Button 8
+  - platform: tm1638
+    name: "Button 8 Suss it Out"
+    id: TM1638Button8
+    internal: true
+    key: 7
+    filters:
+      - delayed_on: 10ms
+    on_press:
+     then:
+        - script.stop: home_search_all_script
+        - script.stop: someone_is_detected_script
+        - script.stop: someone_is_close_kiss_script
+        - script.stop: show_off_script
+        - switch.turn_on: TM1638Led7
+        - script.execute: rtttl_single_high_beep
+        - button.press: sussing_you_out_button
+    on_release:
+     then:
+        - switch.turn_off: TM1638Led7
+    # on_release:
+     # then:
+        # - switch.turn_off: TM1638Led8
+
+uart:
+#Pendant side
+  - id: uart_p 
+    rx_pin: GPIO16  #Green wire | Transmits commands from pendant to robot via mitm uart_p. Wire confusingly (?) labelled RX on pendant!!!! 
+    # tx_pin: #Yellow wire | Not used. Bypass used.
+    baud_rate: 9600
+    data_bits: 8
+    stop_bits: 2
+    parity: NONE
+    rx_buffer_size: 256
+    debug:
+      direction: BOTH
+      dummy_receiver: true
+      after:
+        timeout: 1ms
+        #delimiter: "P"
+      sequence:  
+         #Forward UART messages
+        - uart.write: #Write rx to tx.
+            id: uart_r
+            data: !lambda return bytes ;
+        #Log it.
+        - lambda: 
+            UARTDebug::log_string(direction , bytes);
+
+#Robot_side
+  - id: uart_r 
+    rx_pin: GPIO18 #Yellow wire transmits data from robot to mitm rx uart_r
+    tx_pin: GPIO19 #Green wire transmits/forwards commands from the pendant > mitm > robot
+    baud_rate: 9600
+    data_bits: 8
+    stop_bits: 2
+    parity: NONE
+    rx_buffer_size: 256
+    debug:
+      direction: BOTH
+      dummy_receiver: true
+      after:
+        timeout: 1ms
+      sequence:
+        - lambda: |-
+            UARTDebug::log_string(direction, bytes);  //Log both RX and TX.
+            std::string str(bytes.begin(), bytes.end());  //Convert uart text to string
+            str.erase(std::remove(str.begin(), str.end(), '\0'), str.end());
+            int strLength = str.length(); //Assign the length of str to the variable strLength
+            char secondChar = str[1];
+            std::size_t pos;
+            if (direction == UART_DIRECTION_TX) 
+              {
+                if (secondChar == 'M' || secondChar == 'm') 
+                {
+                  while ((pos = str.find("\r")) != std::string::npos) 
+                    {
+                      str.replace(pos, 1, ",");
+                    }
+                  id(movement_command_sent).publish_state(str);
+                  ESP_LOGD("custom", "Found and forwarded a motor movement command");
+                }
+              }
+            //Do stuff with RX (Only)          
+            else if (direction == UART_DIRECTION_RX)
+                  switch (strLength) 
+                    {
+                      
+                      case 1: // single charater like 0, 1, -
+                        switch (str[0]) 
+                          {
+                            case 'F': //esp Is the current controller
+                              id(esp_is_in_control).publish_state(true);
+                              ESP_LOGD("Control", "ESP is confirmed as in control");
+                              break;
+                              
+                            case 'D': //Load-Save flag dropped message
+                              id(make_esp_master_controller_script).stop();
+                              id(esp_is_in_control).publish_state(false);
+                              id(make_esp_master_controller_script).execute();
+                              ESP_LOGD("Control", "Load Flag Dropped...Re-executing F");
+                              break; 
+                          
+                            case '-': // Movement almost complete
+                              id(motion_about_to_stop_3).publish_state(true);
+                              id(motor_movements_done_4).publish_state(false);
+                              ESP_LOGD("custom", "Movement almost complete message");
+                              break;
+
+                          }
+                        
+                      case 2: //Limit switch and input State change reporting like K8,L1,I1
+                        switch (str[0]) {
+                          case 'K': // Limit switch has turned off
+                            switch (str[1]) {
+                              case '1': id(limit_switch_1).publish_state(false); break;
+                              case '2': id(limit_switch_2).publish_state(false); break;
+                              case '3': id(limit_switch_3).publish_state(false); break;
+                              case '4': id(limit_switch_4).publish_state(false); break;
+                              case '5': id(limit_switch_5).publish_state(false); break;
+                              case '6': id(limit_switch_6).publish_state(false); break;
+                              case '7': id(limit_switch_7).publish_state(false); break;
+                              case '8': id(limit_switch_8).publish_state(false); break;
+                            }
+                            ESP_LOGD("custom", "Limit Switch OFF Message");
+                            break;
+                          case 'L': // Limit switch has turned on
+                            switch (str[1]) {
+                              case '1': id(limit_switch_1).publish_state(true); break;
+                              case '2': id(limit_switch_2).publish_state(true); break;
+                              case '3': id(limit_switch_3).publish_state(true); break;
+                              case '4': id(limit_switch_4).publish_state(true); break;
+                              case '5': id(limit_switch_5).publish_state(true); break;
+                              case '6': id(limit_switch_6).publish_state(true); break;
+                              case '7': id(limit_switch_7).publish_state(true); break;
+                              case '8': id(limit_switch_8).publish_state(true); break;
+                            }
+                            ESP_LOGD("custom", "Limit Switch ON Message"); break;
+                        }
+                        break;
+                        
+                      case 3: // Response From "Check if Movement Almost Completed"
+                        {
+                          if (str.find_first_not_of("01") == std::string::npos)
+                            {
+                              bool limit_switch_state = str[0] == '1';
+                              id(motion_about_to_stop_3).publish_state(limit_switch_state);
+                              ESP_LOGD("custom", "Movement almost complete message");
+                              break;
+                            }
+                        }
+                        
+                      case 4: // Response From "Check if Is Movement Completed"
+                        {
+                          if (str.find_first_not_of("01") == std::string::npos)
+                            {
+                              bool limit_switch_state = str[0] == '1';
+                              id(motor_movements_done_4).publish_state(limit_switch_state);
+                              ESP_LOGD("custom", "Movement complete message");
+                              break;
+                            }
+                        }
+                        
+                      case 5: // Check all motors
+                        switch (str[0]) {
+                          case '0': id(motor_movements_done_4).publish_state(true); break;
+                          case '+': 
+                            id(motor_movements_done_4).publish_state(false);
+                            id(motion_about_to_stop_3).publish_state(false);
+                            break;
+                          case '-': id(motion_about_to_stop_3).publish_state(true); break;
+                          default: break;
+                        }
+                        ESP_LOGD("custom", "Motor status message");
+                        break;                      
+                      case 8: // Response from Check All Limit Switches
+                        {
+                          if (str.find_first_not_of("01") == std::string::npos)
+                            ESP_LOGD("custom", "Limit Switch Message");
+                            for (int i = 0; i < 8; i++) {
+                              bool limit_switch_state = str[i] == '1';
+                              switch(i+1) {
+                                case 1: id(limit_switch_1).publish_state(limit_switch_state); break;
+                                case 2: id(limit_switch_2).publish_state(limit_switch_state); break;
+                                case 3: id(limit_switch_3).publish_state(limit_switch_state); break;
+                                case 4: id(limit_switch_4).publish_state(limit_switch_state); break;
+                                case 5: id(limit_switch_5).publish_state(limit_switch_state); break;
+                                case 6: id(limit_switch_6).publish_state(limit_switch_state); break;
+                                case 7: id(limit_switch_7).publish_state(limit_switch_state); break;
+                                case 8: id(limit_switch_8).publish_state(limit_switch_state); break;
+                                default: break;
+                              }
+                            }
+                            break;
+                        }
+                        
+                      case 9: // Response from Check Inputs
+                        {
+                          ESP_LOGD("custom", "Input Status Message");
+                          for (int i = 0; i < 8; i++) {
+                            bool input_state = str[i] == '1';
+                            switch(i) {
+                              case 1: id(input_1).publish_state(input_state); break;
+                              case 2: id(input_2).publish_state(input_state); break;
+                              case 3: id(input_3).publish_state(input_state); break;
+                              case 4: id(input_4).publish_state(input_state); break;
+                              case 5: id(input_5).publish_state(input_state); break;
+                              case 6: id(input_6).publish_state(input_state); break;
+                              case 7: id(input_7).publish_state(input_state); break;
+                              case 8: id(input_8).publish_state(input_state); break;
+                              default: break;
+                            }
+                          }
+                          break;
+                        }
+                            default: break;
+                    }
+                  
+            
+button:
+  - platform: template
+    name: "Zero Last Movement Amount Button"
+    id: zero_last_movement_amount_button
+    on_press:
+      - script.execute: zero_last_movement_amount_tracker
+  - platform: template
+    name: "Zero Cumulative Movement Amount Button"
+    id: zero_cumulative_movement_amount_button
+    on_press:
+      - script.execute: zero_cumulative_movement_amount_tracker
+
+  #Stop individual Motor
+  # Stop individual Motor
+  - platform: template
+    name: "Stop M1 Base"
+    id: stop_m1_base
+    internal: true
+    on_press:
+      - uart.write:
+          id: uart_r
+          data: "1P"
+      - delay: 300ms
+      - uart.write:
+          id: uart_r
+          data: "1P"
+
+  - platform: template
+    name: "Stop M2 Shoulder"
+    id: stop_m2_shoulder
+    internal: true
+    on_press:
+      - uart.write:
+          id: uart_r
+          data: "2P"
+      - delay: 300ms
+      - uart.write:
+          id: uart_r
+          data: "2P"
+
+  - platform: template
+    name: "Stop M3 Elbow"
+    id: stop_m3_elbow
+    internal: true
+    on_press:
+      - uart.write:
+          id: uart_r
+          data: "3P"
+      - delay: 300ms
+      - uart.write:
+          id: uart_r
+          data: "3P"
+
+  - platform: template
+    name: "Stop Wrist"
+    id: stop_wrist
+    internal: true
+    on_press:
+      - uart.write:
+          id: uart_r
+          data: "4P5P"
+      - delay: 300ms
+      - uart.write:
+          id: uart_r
+          data: "4P5P"
+
+
+  - platform: template
+    name: "Stop M6 Motor"
+    id: stop_m6_motor
+    internal: true
+    on_press:
+      - uart.write:
+          id: uart_r
+          data: "6P"
+      - delay: 300ms
+      - uart.write:
+          id: uart_r
+          data: "6P"
+
+  - platform: template
+    name: "Stop M7 Motor"
+    id: stop_m7_motor
+    internal: true
+    on_press:
+      - uart.write:
+          id: uart_r
+          data: "7P"
+      - delay: 300ms
+      - uart.write:
+          id: uart_r
+          data: "7P"
+
+  - platform: template
+    name: "Stop M8 Pincher"
+    id: stop_m8_motor_pincher
+    internal: true
+    on_press:
+      - uart.write:
+          id: uart_r
+          data: "8P"
+      - delay: 300ms
+      - uart.write:
+          id: uart_r
+          data: "8P"
+     
+          
+#Make ESP Master
+  - platform: template 
+    name: "Make ESP Master Button" 
+    id: make_esp_master_controller_button
+    internal: true
+    on_press:
+      - script.execute: make_esp_master_controller_script
+ #Toggle which port is master   
+  - platform: template 
+    name: "Toggle Controller Pendant Or ESP" 
+    id: toggle_controller_pendant_or_esp
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "F"
+  
+ 
+  - platform: template 
+    name: "Home Search"
+    id: home_search_all_button
+    icon: mdi:home-search
+    on_press:
+      - script.execute: home_search_all_script
+      
+  # - platform: template 
+    # name: "Home Search 1 Base Button" 
+    # id: home_search_1_base_button
+    # on_press:
+      # - script.execute: home_search_base_script
+  # - platform: template 
+    # name: "Home Search 2 Shoulder Button"
+    # id: home_search_2_shoulder_button
+    # on_press:
+      # - script.execute: home_search_shoulder_2_script
+   
+  # - platform: template 
+    # name: "Home Search 3 Elbow Button" 
+    # id: home_search_3_elbow_button
+    # on_press:
+      # - script.execute: home_search_3_elbow_script
+      
+  # - platform: template 
+    # name: "Home Search 3 Wrist Pitch Button" 
+    # id: home_search_3_wrist_pitch_button
+    # on_press:
+      # - script.execute: home_search_3_wrist_pitch_script
+
+  # - platform: template 
+    # name: "Home Search 3 Wrist Rotate Button" 
+    # id: home_search_3_wrist_rotate_button
+    # on_press:
+      # - script.execute: home_search_4_wrist_rotate_script
+ 
+  - platform: template 
+    name: "Interrupt Mode Turn On Send UART" 
+    id: interrupt_mode_turn_on_send_uart_button
+    internal: true
+    on_press:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "W"
+      - delay: 300ms
+      - uart.write: 
+          id: uart_r
+          data: "W"
+          
+          
+          
+ 
+##################################################################################################### 
+#State requests 
+#####################################################################################################     
+
+#Motion almost done?
+  - platform: template 
+    name: "Request Status Are Motors About To Stop (3 x E)" #whether all motor registers are set to zero
+    id: request_status_are_all_motors_about_to_stop_3char #Response will be 3 chars of 0/1
+    on_press:
+      - lambda: |-
+          id(uart_r).write_str("EEE");
+
+#Motion done?         
+  - platform: template 
+    name: "Request Status Are All Motors Stopped (4 x T)" #whether all motor registers are set to zero
+    id: request_status_are_all_motors_stopped_4char #Response will be 4 chars of 0/1
+    on_press:
+      - lambda: |-
+          id(uart_r).write_str("TTTT");
+          
+  - platform: template 
+    name: "Request Status of All Motors (5 x A)" #whether all motor registers are set to zero
+    id: check_status_of_all_motors_5char #Response will be 4 chars of 0/1
+      # A Designates a check motor status command.
+      # On receipt of A, the controller will check the status of all motors and respond with
+      # the following ASCII codes:
+      # 0 If none of the motors is moving, and none is intended to move.
+      # – If all the motors have less than the offset number of encoder pulses to complete
+      # their movements.
+      # + If there are motors which still have to complete more than the offset number
+      # of pulses to complete their movement.
+      # 1 . . . 8 If a motor error has occurred    
+    on_press:
+      - lambda: |-
+          id(uart_r).write_str("AAAAA");
+   
+  - platform: template 
+    name: "Request Status of Limit Switches (8 x ?L)"
+    id: request_status_all_limit_switches_8char
+    on_press: #Response will be 8 chars of 0/1
+      - lambda: |-
+          id(uart_r).write_str("1L2L3L4L5L6L7L8L");
+          
+  - platform: template 
+    name: "Request Status of Inputs Switches (9 x ?I)"
+    id: request_status_all_inputs_9char
+    on_press: #Response will be 10 chars of 0/1
+      - lambda: |-
+          id(uart_r).write_str("1I2I3I4I5I6I7I8I8I");
+          
+
+#Set offset (for smooth motion)
+  - platform: template 
+    name: "Set Offset to Default" 
+    id: set_offset_to_default
+    icon: mdi:wrench-check
+    on_press:
+      - number.set:
+          id: change_offset
+          value: 14
+
+#Zero all motor movements
+  - platform: template
+    name: "Zero Motor Movement Commands"
+    id: zero_all_motor_movements_commands
+    icon: mdi:numeric-0-circle
+    on_press:
+      - number.set:
+          id: m_1m_rotate_base
+          value: 0
+      - number.set:
+          id: m_2m_tilt_shoulder
+          value: 0
+      - number.set:
+          id: m_3m_tilt_elbow
+          value: 0
+      - number.set:
+          id: m_4m_wrist1
+          value: 0
+      - number.set:
+          id: m_5m_wrist2
+          value: 0
+      - number.set:
+          id: m_45m_pitch_wrist
+          value: 0
+      - number.set:
+          id: m_45m_roll_wrist
+          value: 0
+      - number.set:
+          id: m_8m_pincher
+          value: 0
+          
+  
+#Run HA free text command
+  - platform: template
+    name: "Run HA Text Command"
+    icon: mdi:format-text-rotation-none
+    id: ha_scorbot_text_command
+    on_press:
+      - logger.log: Executing HA Free Text Scorbot Command
+      - uart.write:
+          id: uart_r
+          #Need to handle \r conversion. Or '1M+30\r2M+20\r3M+100\r' ends up like '1M+30\\r2M+20\\r3M+100\\r'
+          #Thanks @ssieb : https://discord.com/channels/429907082951524364/1091572034741489684/1091613097380298795
+          data: !lambda |-
+              std::string str = id(ha_scobot_text_command).state;
+              std::size_t pos;
+              while ((pos = str.find("\\r")) != std::string::npos) 
+                {
+                    str.replace(pos, 2, "\r");
+                }
+              return std::vector<uint8_t>(str.begin(), str.end());         
+
+#Run ESPHome compound inputs command.
+  - platform: template
+    name: "Run ESP Motor Movement Command"
+    id: esp_scorbot_command
+    icon: mdi:motion-play
+    on_press:
+      - logger.log: Executing ESP UART Command to Robot
+      - uart.write:
+          id: uart_r
+          #Need to handle \r conversion. Or '1M+30\r2M+20\r3M+100\r' ends up like '1M+30\\r2M+20\\r3M+100\\r'
+          data: !lambda |-
+            std::size_t pos;
+            std::string str = id(esp_motor_movement_uart_command).state;
+            while ((pos = str.find("\\r")) != std::string::npos)
+              str.replace(pos, 2, "\r");
+            std::vector<uint8_t> vec(str.begin(), str.end());
+            return vec; 
+
+#Run ESPHome return to base command. Reverses Issued movments. Optimisitic.
+  - platform: template
+    name: "Return Home"
+    id: esp_scorbot_return_to_base_command
+    icon: mdi:home-export-outline
+    on_press:
+      - logger.log: Executing ESP UART Return to base Command 
+      - uart.write:
+          id: uart_r
+          data: !lambda |-
+            std::size_t pos;
+            std::string str = id(esp_return_to_base_uart_command).state;
+            while ((pos = str.find("\\r")) != std::string::npos)
+              str.replace(pos, 2, "\r");
+            std::vector<uint8_t> vec(str.begin(), str.end());
+            return vec; 
+      - delay: 1s
+      - script.execute: zero_last_movement_amount_tracker
+      - script.execute: zero_cumulative_movement_amount_tracker
+      - delay: 2s
+      - button.press: request_status_all_limit_switches_8char
+      - delay: 2s
+      - button.press: request_status_all_limit_switches_8char
+
+# #Hardcoded Motor Movements       
+  # - platform: template
+    # icon: mdi:arrow-decision-outline
+    # name: "Movement 1"
+    # id: movement1
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "1M+100\r2M+100\r3M+100\r"
+  # - platform: template
+    # name: "Movement 2"
+    # icon: mdi:arrow-decision-outline
+    # id: movement2
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "1M-100\r2M-100\r3M-100\r"
+
+#Nudge Motors 
+  - platform: template
+    icon: mdi:arrow-left-bold-circle
+    name: "Nudge Base Left"
+    id: nudge_base_left
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "1M-50\r"
+  - platform: template
+    icon: mdi:arrow-right-bold-circle
+    name: "Nudge Base Right"
+    id: nudge_base_right
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "1M+50\r"
+          
+  - platform: template
+    icon: mdi:arrow-up-bold-circle
+    name: "Nudge Shoulder Up"
+    id: nudge_shoulder_up
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "2M-50\r"
+  - platform: template
+    icon: mdi:arrow-down-bold-circle
+    name: "Nudge Shoulder Down"
+    id: nudge_shoulder_down
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "2M+50\r"
+          
+  - platform: template
+    icon: mdi:arrow-up-bold-circle
+    name: "Nudge Elbow Up"
+    id: nudge_elbow_up
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "3M+50\r"
+  - platform: template
+    icon: mdi:arrow-down-bold-circle
+    name: "Nudge Elbow Down"
+    id: nudge_elbow_down
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "3M-50\r"
+ 
+  - platform: template
+    icon: mdi:arrow-up-bold-circle
+    name: "Nudge Wrist Up"
+    id: nudge_wrist_up
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "4M+10\r5M-10\r"
+  - platform: template
+    icon: mdi:arrow-down-bold-circle
+    name: "Nudge Wrist Down"
+    id: nudge_wrist_down
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "4M-10\r5M+10\r"
+          
+  - platform: template
+    name: "Nudge Wrist Rotate"
+    id: nudge_wrist_rotate
+    icon: mdi:rotate-right
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "4M-20\r5M-20\r"
+
+  - platform: template
+    name: "Kiss"
+    icon: mdi:robot-love
+    id: kisses_button
+    on_press:
+      - script.execute: someone_is_close_kiss_script
+
+  - platform: template
+    name: "Suss"
+    icon: mdi:robot-confused
+    id: sussing_you_out_button
+    on_press:
+      - script.execute: sussing_you_out_script
+
+  - platform: template
+    name: "Show Off"
+    icon: mdi:rocket-launch
+    id: show_off_button
+    on_press:
+      - script.execute: show_off_script
+
+
+#Emergency Brake
+  - platform: template
+    name: "Brake"
+    icon: mdi:alert-octagon
+    id: emergency_brake
+    on_press:
+      - uart.write: 
+          id: uart_r
+          data: "B"
+      - uart.write: 
+          id: uart_r
+          data: "B"
+  
+  
+##### Not used  ##### 
+# #Check Motors are HOME (endstop switch ON)
+  # #Response is 1 if Home, else 0.
+  # - platform: template
+    # icon: mdi:home-search-outline
+    # name: "Base Home Check"
+    # id: check_if_base_is_home_1L
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "1L"
+  # - platform: template
+    # icon: mdi:home-search-outline
+    # name: "Shoulder Home Check"
+    # id: check_if_shoulder_is_home
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "2L"
+  # - platform: template
+    # icon: mdi:home-search-outline
+    # name: "Elbow Home Check"
+    # id: check_if_elbow_is_home
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "3L"
+  # - platform: template
+    # icon: mdi:home-search-outline
+    # name: "M4 Home Check"
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "4L"
+  # - platform: template
+    # icon: mdi:home-search-outline
+    # name: "M5 Home Check"
+    # id: check_if_m5_is_home
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "5L"
+  # - platform: template
+    # icon: mdi:home-search-outline
+    # name: "Pincher Home Check"
+    # id: check_if_pincher_is_home
+    # on_press:
+      # - uart.write: 
+          # id: uart_r
+          # data: "8L"
+          
+          
+text_sensor:
+  - platform: template
+    id: robot_status
+    name: "Robot Status"
+    on_value:
+      then:
+        if:
+          condition:
+            for:
+              time: 60s
+              condition:
+                - text_sensor.state:
+                    id: robot_status
+                    state: "Idle"
+          then:
+            - switch.turn_off: power_control_box_switch
+          
+
+  - platform: template
+    id: tof_nearness_category
+    name: "ToF Nearness Category"
+    icon: "mdi:arrow-expand-horizontal"
+    filters:
+    #Delta filter.
+     - lambda: |-
+          static std::string last;
+          if (x == last)
+            return {};
+          last = x;
+          return x;
+
+
+  - platform: template
+    id: screen_message
+    name: "Screen Message"
+    icon: "mdi:arrow-expand-horizontal"
+    filters:
+     - lambda: |-
+          static std::string last;
+          if (x == last)
+            return {};
+          last = x;
+          return x;
+    on_value:
+      then:
+        - lambda: |-
+            id(tm1638_display).update();
+            
+            
+
+  - platform: homeassistant
+    #Example: 1M+30\r2M+20\r3M+100\r 
+    #Imported from HA.
+    name: "Movement Command HA Raw Text"
+    entity_id: input_text.scorbot_command
+    id: ha_scobot_text_command
+    internal: true
+
+    
+  - platform: template
+    name: "Movement Command ESP Composite Command"
+    id: esp_motor_movement_uart_command
+    icon: mdi:format-text-rotation-none
+    update_interval: 60s    
+    #Compiles the motor movement into a UART string command.
+    #like: 1m0\r2m0\r3m0\r4m0\r5m0\r8m-15\r
+    #I used lower case so you can identify injected UART easier in logs(not case sensitive).
+    #Below is verbose/repetative. There's prob a better way.
+    lambda: |-
+      int int_m_1m_rotate_base = round(id(m_1m_rotate_base).state *-1);
+      std::string str_m_1m_rotate_base = ("1m" + String(int_m_1m_rotate_base) + "\\r").c_str();
+      
+      int int_m_2m_tilt_shoulder = round(id(m_2m_tilt_shoulder).state);
+      std::string str_m_2m_tilt_shoulder = ("2m" + String(int_m_2m_tilt_shoulder) + "\\r").c_str();
+      
+      int int_m_3m_tilt_elbow = round(id(m_3m_tilt_elbow).state);
+      std::string str_m_3m_tilt_elbow = ("3m" + String(int_m_3m_tilt_elbow) + "\\r").c_str();
+      
+      int int_m_4m_wrist1 = round(id(m_4m_wrist1).state);
+      std::string str_m_4m_wrist1 = ("4m" + String(int_m_4m_wrist1) + "\\r").c_str();
+      
+      int int_m_5m_wrist2= round(id(m_5m_wrist2).state);
+      std::string str_m_5m_wrist2 = ("5m" + String(int_m_5m_wrist2) + "\\r").c_str();
+      
+      int int_m_8m_pincher = round(id(m_8m_pincher).state);
+      std::string str_m_8m_pincher = ("8m" + String(int_m_8m_pincher) + "\\r").c_str();
+      
+      return {(
+        str_m_1m_rotate_base 
+        + str_m_2m_tilt_shoulder 
+        + str_m_3m_tilt_elbow
+        + str_m_4m_wrist1 
+        + str_m_5m_wrist2
+        + str_m_8m_pincher
+              )
+        };
+
+  - platform: template
+    name: "Return to Base UART Command"
+    id: esp_return_to_base_uart_command
+    icon: mdi:format-text-rotation-none
+    update_interval: 60s    
+    #Compiles the motor movement into a UART string command.
+    #like: 1m0\r2m0\r3m0\r4m0\r5m0\r8m-15\r
+    #I used lower case so you can identify injected UART easier in logs(not case sensitive).
+    #Below is verbose/repetative. There's prob a better way.
+    lambda: |-
+      int int_m1_cumulative_movement_amount = round(-id(m1_cumulative_movement_amount).state);
+      std::string str_m1_cumulative_movement_amount = ("1m" + std::to_string(int_m1_cumulative_movement_amount) + "\\r");
+      
+      int int_m2_cumulative_movement_amount = round(-id(m2_cumulative_movement_amount).state);
+      std::string str_m2_cumulative_movement_amount = ("2m" + std::to_string(int_m2_cumulative_movement_amount) + "\\r");
+      
+      int int_m3_cumulative_movement_amount = round(-id(m3_cumulative_movement_amount).state);
+      std::string str_m3_cumulative_movement_amount = ("3m" + std::to_string(int_m3_cumulative_movement_amount) + "\\r");
+      
+      int int_m4_cumulative_movement_amount = round(-id(m4_cumulative_movement_amount).state);
+      std::string str_m4_cumulative_movement_amount = ("4m" + std::to_string(int_m4_cumulative_movement_amount) + "\\r");
+      
+      int int_m5_cumulative_movement_amount = round(-id(m5_cumulative_movement_amount).state);
+      std::string str_m5_cumulative_movement_amount = ("5m" + std::to_string(int_m5_cumulative_movement_amount) + "\\r");
+      
+      int int_m8_cumulative_movement_amount = round(-id(m8_cumulative_movement_amount).state);
+      std::string str_m8_cumulative_movement_amount = ("8m" + std::to_string(int_m8_cumulative_movement_amount) + "\\r");
+      
+      return {
+        str_m1_cumulative_movement_amount +
+        str_m2_cumulative_movement_amount +
+        str_m3_cumulative_movement_amount +
+        str_m4_cumulative_movement_amount +
+        str_m5_cumulative_movement_amount +
+        str_m8_cumulative_movement_amount
+      };
+
+
+
+  - platform: template
+    name: "Last Movement Command Sent "
+    id: movement_command_sent
+    icon: mdi:format-text-rotation-none
+    update_interval: never
+    #x is like "1M-100\r2M-100\r3M-100\r"
+    on_raw_value:
+      then:
+        - lambda: |-
+            std::string item;
+            std::size_t start = 0, end; // Initialize "start" variable to 0
+            // Loop until no ',' character is found in "x"
+            while ((end = x.find(",", start)) != std::string::npos) 
+            {
+              // Extract substring from "x" starting at "start" and ending at "end"
+              item = x.substr(start, end - start);
+              // Split item by "M" to get motor number and movement amount
+              std::size_t motor_number_pos = item.find_first_of("Mm");
+              std::string motor_number_str = item.substr(0, motor_number_pos);
+              std::string movement_amount_str = item.substr(motor_number_pos + 1);
+              // If motor number and movement amount are not empty, process them
+              if (!motor_number_str.empty() && !movement_amount_str.empty()) 
+              {
+                int motor_number = std::stoi(motor_number_str);
+                int movement_amount = std::stoi(movement_amount_str);
+                ESP_LOGD("custom", "Motor Number: %d, Movement Amount: %d", motor_number, movement_amount);
+                // Publish movement amount to corresponding template based on motor number
+                switch (motor_number) 
+                {
+                  case 1: id(m1_last_movement_amount).publish_state(movement_amount); break;
+                  case 2: id(m2_last_movement_amount).publish_state(movement_amount); break;
+                  case 3: id(m3_last_movement_amount).publish_state(movement_amount); break;
+                  case 4: id(m4_last_movement_amount).publish_state(movement_amount); break;
+                  case 5: id(m5_last_movement_amount).publish_state(movement_amount); break;
+                  case 6: id(m6_last_movement_amount).publish_state(movement_amount); break;
+                  case 7: id(m7_last_movement_amount).publish_state(movement_amount); break;
+                  case 8: id(m8_last_movement_amount).publish_state(movement_amount); break;
+                  default: break;
+                }
+              }
+              // Set "start" to position after ',' character found
+              start = end + 1;
+            }
+
+
+switch:
+#Light On the Art
+  - platform: template
+    name: "Light On Time Traveller"
+    id: light_on_time_traveller_light
+    optimistic: false
+    icon: mdi:track-light
+    assumed_state: false
+    lambda: return id(robot_is_time_travelling).state;
+    turn_on_action:
+      - script.execute: move_to_timetraveller_script
+    turn_off_action:
+      - script.execute: go_home_from_timetraveller_script
+      
+#Switch the Control ports so that the ESP Is In Control
+  - platform: template
+    name: "Make ESP Master Switch"
+    id: make_esp_master_switch
+    icon: mdi:car-esp
+    optimistic: false
+    assumed_state: false
+    lambda: return id(esp_is_in_control).state;
+    turn_on_action:
+      - script.execute: make_esp_master_controller_script
+    turn_off_action:
+      #Optimistic
+      - lambda: id(esp_is_in_control).publish_state(false);        
+      - button.press: toggle_controller_pendant_or_esp #if send F and hope it works.
+      - lambda: ESP_LOGD("Control", "Hopefully handed control back to Pendant");
+      - switch.turn_off: TM1638Led3
+
+#Power Switch for the Control Box (Seperate Smart Switch)
+  - platform: template
+    name: "Power Control Box Switch"
+    id: power_control_box_switch
+    icon: mdi:power
+    optimistic: false
+    lambda: return id(robot_power_is_on).state;
+    turn_on_action:
+      - while:
+          condition:
+            binary_sensor.is_off: robot_power_is_on
+          then:
+           - homeassistant.service:
+                service: switch.turn_on
+                data:
+                  entity_id: switch.scorby_power_controller_power_switch
+           - delay: 1s
+    turn_off_action:
+      - script.execute: safe_shutdown
+      - script.wait: safe_shutdown
+      - homeassistant.service:
+          service: switch.turn_off
+          data:
+            entity_id: switch.scorby_power_controller_power_switch
+            
+
+  - platform: template
+    name: "Light Loop Retro LEDs"
+    id: rotate_retro_leds
+    icon: mdi:lighthouse-on
+    optimistic: true
+    turn_on_action:
+      - delay: 500ms
+      - while:
+          condition:
+            switch.is_on: rotate_retro_leds
+          then:
+            - script.execute: single_cycle_leds
+            - script.wait: single_cycle_leds
+    turn_off_action:
+            - light.turn_off: led_row_1
+            - light.turn_off: led_row_2
+            - light.turn_off: led_row_3
+            - light.turn_off: led_row_4
+            - light.turn_off: led_row_5
+            - light.turn_off: led_row_6
+ 
+  - platform: template
+    name: "Light Flash Red Row"
+    id: flash_red_row_switch
+    icon: mdi:lighthouse-on
+    optimistic: true
+    turn_on_action:
+      - delay: 500ms
+      - while:
+          condition:
+            switch.is_on: flash_red_row_switch
+          then:
+            - script.execute: flash_red_row_script
+            - script.wait: flash_red_row_script
+    turn_off_action:
+            - light.turn_off: led_row_1
+
+  - platform: template
+    name: "Light Flash Green Row"
+    id: flash_green_row_switch
+    optimistic: true
+    icon: mdi:lighthouse-on
+    turn_on_action:
+      - delay: 500ms
+      - while:
+          condition:
+            switch.is_on: flash_green_row_switch
+          then:
+            - script.execute: flash_green_row_script
+            - script.wait: flash_green_row_script
+    turn_off_action:
+            - light.turn_off: led_row_2
+
+  - platform: template
+    name: "Light Loop Star Wars"
+    id: loop_star_wars
+    optimistic: true
+    icon: mdi:lighthouse-on
+    turn_on_action:
+      - delay: 500ms
+      - while:
+          condition:
+            switch.is_on: loop_star_wars
+          then:
+            - script.execute: star_wars
+            - wait_until:
+                condition:
+                  not:
+                    rtttl.is_playing
+                timeout: 20s
+            - delay: 2s
+    turn_off_action:
+      - rtttl.stop
+            
+  - platform: template
+    name: "Loop Star Wars and Lights"
+    id: loop_star_wars_and_lights
+    optimistic: true
+    icon: mdi:weather-night
+    turn_on_action:
+      - switch.turn_on: loop_star_wars
+      - switch.turn_on: rotate_retro_leds
+    turn_off_action:
+      - switch.turn_off: loop_star_wars
+      - switch.turn_off: rotate_retro_leds
+      
+      
+#tm1638 LEDs
+  - platform: tm1638
+    id: TM1638Led1
+    name: LED Robot Power Is On
+    led: 0
+    internal: true
+  - platform: tm1638
+    id: TM1638Led2
+    name: LED Robot Ready For Action
+    led: 1
+    internal: true
+  - platform: tm1638
+    id: TM1638Led3
+    led: 2
+    internal: true
+  - platform: tm1638
+    id: TM1638Led4
+    led: 3
+    internal: true
+  - platform: tm1638
+    id: TM1638Led5
+    led: 4
+    internal: true
+  - platform: tm1638
+    id: TM1638Led6
+    led: 5
+    internal: true
+  - platform: tm1638
+    id: TM1638Led7
+    led: 6
+  - platform: tm1638
+    id: TM1638Led8
+    led: 7
+    internal: true
+    
+  - platform: template
+    #Simple motor speed control.
+    name: "Slow Speed Mode"
+    id: slow_speed_mode_switch
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - number.set:
+          id: speed_all_motors
+          value: 1 #1 is slowest
+    turn_off_action:
+      - number.set:
+          id: speed_all_motors
+          value: 0 #0 is fastest (after 9 confusingly)
+
+
+#Interupt Mode
+    # Enable Interrupt Mode
+    # W Designates the enable interrupt mode command.
+    # On receipt of W, the controller will effect interrupts to the computer whenever specific events occur. 
+    #The controller sends the following ASCII codes as interrupts:
+        # 0 Change from motor movement to motor stop on all the motors.
+        # – Change from the state in which at least one motor has more than the offset remaining to state where no motor has more than the offset remaining.
+    # 1 Change from the state of the movement of the motors 1 though 8 to a state in
+    # which they are stalled or fail to move (motor error).
+        # L1 . . . L8 When limit switch (1 through 8) goes from OFF to ON state.
+        # L1 . . . L8 When limit switch (1 through 8) goes from ON to OFF state.
+        # I1 . . . I8 When input (1 through 8) goes from OFF to ON state.
+        # J1 . . . J8 When input (1 through 8) goes from ON to OFF state.
+        # Refer to the uni-directional command X for disabling the interrupt mode.        
+  - platform: template
+    name: "Interrupt Mode Switch"
+    id: interrupt_mode_switch
+    optimistic: True
+    assumed_state: False
+    icon: mdi:message-alert
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - script.wait: make_esp_master_controller_script
+      - button.press: interrupt_mode_turn_on_send_uart_button
+      - delay: 2s
+      - script.execute: request_status_updates
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "X"
+      - delay: 300ms
+      - uart.write: 
+          id: uart_r
+          data: "X"
+      - delay: 3s
+      - script.execute: request_status_updates
+
+#Outputs
+#1-8S on, 1-8R off. 
+  - platform: template
+    name: "Output 1"
+    id: output_1
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "1S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "1R"
+
+  - platform: template
+    name: "Output 2"
+    id: output_2
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "2S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "2R"
+
+  - platform: template
+    name: "Output 3"
+    id: output_3
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "3S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "3R"
+
+  - platform: template
+    name: "Output 4"
+    id: output_4
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "4S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "4R"
+
+  - platform: template
+    name: "Output 5"
+    id: output_5
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "5S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "5R"
+
+  - platform: template
+    name: "Output 6"
+    id: output_6
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "6S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "6R"
+
+  - platform: template
+    name: "Output 7"
+    id: output_7
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "7S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "7R"
+
+  - platform: template
+    name: "Output 8"
+    id: output_8
+    optimistic: True
+    assumed_state: True
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "8S"
+    turn_off_action:
+      - delay: 100ms
+      - uart.write: 
+          id: uart_r
+          data: "8R"      
+
+number:
+  - platform: template
+    id: someone_is_close_threshold
+    icon: mdi:boom-gate-arrow-down
+    name: "Someone Is Close Threshold"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: 50
+    max_value: 80
+    step: 5
+    restore_value: true
+    initial_value: 80
+  - platform: template
+    id: someone_is_very_close_threshold
+    icon: mdi:boom-gate-arrow-down
+    name: "Someone Is Very Close Threshold"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: 30
+    max_value: 80
+    step: 5
+    restore_value: true
+    initial_value: 50
+#########################################################
+#Set Motor Speed
+#########################################################
+    # Set Speed of Motors
+      # a V b
+      # a A digit from 1 to 8, denotes the number of the motors whose speed is to be set.
+      # Use 0 to denote all motors.
+      # V Designates a motor speed command.
+      # b A digit from 0 to 9, denotes the speed setting. The slowest speed is 1, increasing to 9. The fastest speed is 0.
+  - platform: template
+    id: speed_all_motors
+    icon: mdi:arrow-expand-horizontal
+    name: "Speed All Motors"
+    optimistic: True
+    min_value: 0
+    max_value: 9
+    step: 1
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then: #Construct and send the UART Command.
+        - delay: 100ms
+        - uart.write:
+            id: uart_r
+            data: !lambda |-
+              int int_offset = round(x);
+              std::string str = ("0V" + String(int_offset) ).c_str();
+              std::vector<uint8_t> vec(str.begin(), str.end());
+              return vec;
+
+#########################################################
+#Set Offset
+#########################################################
+#U Change offset command. U014*
+#This is key to resolving jerky movement introduced by MITM latency.
+#50 up from 14 seems about right.
+#E command checks if movements left is < U 
+  - platform: template
+    id: change_offset
+    icon: mdi:arrow-expand-horizontal
+    name: "Change Offset"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: 10
+    max_value: 90
+    step: 1
+    restore_value: true
+    initial_value: 14
+    internal: true
+    set_action:
+      then:
+        - component.update: esp_motor_movement_uart_command
+        - uart.write:
+            id: uart_r
+            data: !lambda |-
+              int int_offset = round(x);
+              std::string str = ("U0" + String(int_offset) + "*").c_str();
+              std::vector<uint8_t> vec(str.begin(), str.end());
+              return vec;
+         
+#########################################################
+#Set Motor Movement Amount
+#########################################################
+#Single Motor
+#Rotate base:
+    #Viewing from top
+      # - clockwise
+      # + counter clockwise 
+  - platform: template
+    id: m_1m_rotate_base
+    icon: mdi:rotate-360
+    name: "M1 Rotate Base"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+         - delay: 100ms
+         - component.update: esp_motor_movement_uart_command
+    
+#Tilt Shoulder 
+      # - Up / Back
+      # + Down / Forward
+  - platform: template
+    id: m_2m_tilt_shoulder
+    icon: mdi:boom-gate-arrow-down
+    name: "M2 Tilt Shoulder"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+         - delay: 100ms
+         - component.update: esp_motor_movement_uart_command
+    
+#Tilt Elbow
+      # + Up / Back
+      # - Down / Forward
+  - platform: template
+    id: m_3m_tilt_elbow
+    icon: mdi:boom-gate-arrow-down
+    name: "M3 Tilt Elbow"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+         - delay: 100ms
+         - component.update: esp_motor_movement_uart_command
+
+#Dual Motor Movements for M4 & M5
+# Pitch (wrist): mixed signs
+  # Up +-
+    # 4M+10\r5M-10\r
+  # Down -+
+    # 4M-10\r5M+10\r  
+  #Define as:
+    #+ Down
+    #- Up
+  - platform: template
+    id: m_45m_pitch_wrist
+    icon: mdi:hand-peace
+    name: "M4&5 Pitch Wrist"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+        - delay: 100ms
+        - number.set:
+            id: m_4m_wrist1
+            value: !lambda return -x;
+        - number.set:
+            id: m_5m_wrist2
+            value: !lambda return x;
+    
+# Roll (wrist): Same signs
+  # Clockwise ++ :  \r4M+10\r5M+10
+  # Anti-Clockwise --: \r4M-10\r5M-10
+  #Define as:
+    #+ Clockwise
+    #- Anti-Clockwise
+  - platform: template
+    id: m_45m_roll_wrist
+    icon: mdi:rotate-right
+    name: "M4&5 Roll Wrist"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+        - delay: 100ms
+        - number.set:
+            id: m_4m_wrist1
+            value: !lambda return x;
+        - number.set:
+            id: m_5m_wrist2
+            value: !lambda return x;
+            
+  - platform: template
+    id: m_4m_wrist1
+    icon: mdi:fast-forward-45
+    name: "M4 Wrist 1/2"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+         - delay: 100ms
+         - component.update: esp_motor_movement_uart_command
+#5M
+  - platform: template
+    id: m_5m_wrist2
+    icon: mdi:fast-forward-45
+    name: "M5 Wrist 2/2"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+         - delay: 100ms
+         - component.update: esp_motor_movement_uart_command
+         
+#6M
+  - platform: template
+    id: m_6m
+    icon: mdi:fast-forward-45
+    name: "M6"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+        - delay: 100ms
+        - uart.write:
+            id: uart_r
+            data: !lambda |-
+              std::string str = ("6m" + String(round(x)) + "\r").c_str();
+              std::vector<uint8_t> vec(str.begin(), str.end());
+              return vec;
+                
+#8M: Pincher
+  # Open (-): 8M-800
+  # Close (+): 8M+800
+  - platform: template
+    id: m_8m_pincher
+    icon: mdi:hand-okay
+    name: "M8 Pincher"
+    optimistic: true
+    unit_of_measurement: pulses
+    min_value: -800
+    max_value: 800
+    step: 10
+    restore_value: true
+    initial_value: 0
+    set_action:
+      then:
+         - delay: 100ms
+         - component.update: esp_motor_movement_uart_command
+
+script:
+#buzzer
+  - id: rtttl_single_high_beep
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=1,o=7,b=100:32a'  
+  - id: rtttl_single_mid_beep
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=8,o=1,b=100:32a' 
+  - id: double_high_beep_buzzer
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=1,o=7,b=100:32a,32a' 
+  - id: rtttl_double_mid_beep
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=8,o=1,b=100:32a,32a' 
+        
+  - id: rtttl_quick_double_scale_up
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=32,o=7,b=500:c,c#,d#,e,f#,g#,a#,b,c,c#,d#,e,f#,g#,a#,b'
+        
+  - id: rtttl_single_scale_down
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=32,o=1,b=100:b,a#,g#,f#,e,d#,c#,c'
+        
+  - id: rtttl_fast_random_beeps
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=32,o=1,b=200:b7,a,d5,b,d,g,c4,c7'
+        
+  - id: rtttl_alarm
+    then:
+    - rtttl.play:
+        rtttl: 'beep:d=1,o=4,b=100:32a,32a,32a,32a,32a,32a,32a,32a'
+
+
+  - id: star_wars
+    then:
+      - rtttl.play:
+          rtttl: 'star wars:d=4,o=5,b=55:32p,32f#,32f#,32f#,8b.,8f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32e6,8c#.6,32f#,32f#,32f#,8b.,8f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32e6,8c#6'
+      
+  - id: single_cycle_leds
+    then:
+      - light.turn_on: led_row_1
+      - delay: ${transition_through_lights}
+      - light.turn_off: led_row_1
+      - light.turn_on: led_row_2
+      - delay: ${transition_through_lights}
+      - light.turn_off: led_row_2
+      - light.turn_on: led_row_3
+      - delay: ${transition_through_lights}
+      - light.turn_off: led_row_3
+      - light.turn_on: led_row_4
+      - delay: ${transition_through_lights}
+      - light.turn_off: led_row_4
+      - light.turn_on: led_row_5
+      - delay: ${transition_through_lights}
+      - light.turn_off: led_row_5
+      - light.turn_on: led_row_6
+      - delay: ${transition_through_lights}
+      - light.turn_off: led_row_6
+      - delay: ${transition_through_lights}
+
+  - id: flash_red_row_script
+    then:
+      - light.turn_on: led_row_1
+      - delay: 300ms
+      - light.turn_off: led_row_1
+      - delay: 300ms
+
+  - id: flash_green_row_script
+    then:
+      - light.turn_on: led_row_2
+      - delay: 300ms
+      - light.turn_off: led_row_2
+      - delay: 300ms
+
+  - id: home_flash_green_row
+    then:
+      - repeat:
+          count: 2
+          then:
+            - script.execute: flash_green_row_script  
+            - script.wait: flash_green_row_script
+
+  - id: safe_shutdown
+    then:
+      - switch.turn_off: slow_speed_mode_switch
+      - delay: 1s
+      - switch.turn_off: interrupt_mode_switch
+      - delay: 1s
+      - switch.turn_off: make_esp_master_switch
+      - delay: 1s
+      - repeat:
+          count: 5
+          then:
+            - script.execute: flash_red_row_script  
+            - script.wait: flash_red_row_script  
+      - delay: 1s            
+      - switch.turn_off: power_control_box_switch
+
+
+  - id: zero_last_movement_amount_tracker
+    then:
+      - lambda: |-
+            id(m1_last_movement_amount).publish_state(0);
+            id(m2_last_movement_amount).publish_state(0);
+            id(m3_last_movement_amount).publish_state(0);
+            id(m4_last_movement_amount).publish_state(0);
+            id(m5_last_movement_amount).publish_state(0);
+            id(m6_last_movement_amount).publish_state(0);
+            id(m7_last_movement_amount).publish_state(0);
+            id(m8_last_movement_amount).publish_state(0);
+
+  - id: zero_cumulative_movement_amount_tracker
+    then:
+      - lambda: |-
+            id(m1_cumulative_movement_amount).publish_state(0);
+            id(m2_cumulative_movement_amount).publish_state(0);
+            id(m3_cumulative_movement_amount).publish_state(0);
+            id(m4_cumulative_movement_amount).publish_state(0);
+            id(m5_cumulative_movement_amount).publish_state(0);
+            id(m6_cumulative_movement_amount).publish_state(0);
+            id(m7_cumulative_movement_amount).publish_state(0);
+            id(m8_cumulative_movement_amount).publish_state(0);
+            
+  - id: set_all_button_states_to_off
+    then:
+      - lambda: id(TM1638Button1).publish_state(false);
+      - lambda: id(TM1638Button2).publish_state(false);
+      - lambda: id(TM1638Button3).publish_state(false);
+      - lambda: id(TM1638Button4).publish_state(false);
+      - lambda: id(TM1638Button5).publish_state(false);
+      - lambda: id(TM1638Button6).publish_state(false);
+      - lambda: id(TM1638Button7).publish_state(false);
+      - lambda: id(TM1638Button8).publish_state(false);
+      
+  - id: request_status_updates #Run after Scorby is on and ESP is in control
+    then:
+      - lambda: ESP_LOGD("Updates", "Starting initial status checks");
+      - delay: 300ms
+      - button.press: request_status_are_all_motors_about_to_stop_3char
+      - delay: 300ms
+      - button.press: request_status_are_all_motors_stopped_4char
+      - delay: 300ms
+      - button.press: check_status_of_all_motors_5char
+      - delay: 300ms
+      - button.press: request_status_all_inputs_9char
+      - delay: 300ms
+      - button.press: request_status_all_limit_switches_8char 
+      - lambda: ESP_LOGD("Updates", "Initial status checks done");      
+ 
+  - id: configure_controller_settings #Run after Scorby is on and ESP is in control
+    then:
+      #Set defaults and confirm states
+      - script.wait: make_esp_master_controller_script
+      - switch.turn_on: interrupt_mode_switch
+      - delay: 500ms
+      - button.press: set_offset_to_default
+
+  - id: make_esp_master_controller_script #Request that computer port the ESP32 uses is activated
+    then:
+      - delay: 500ms
+      - lambda: id(esp_is_in_control).publish_state(false); #start by setting it to being off. 
+      - delay: 500ms
+      - while: #While off, keep sending F until the contoller has sent F back
+          condition:
+            not:
+              binary_sensor.is_on: esp_is_in_control #binary sensor is activated once an 'F' is recieved
+          then:
+            - delay: 1s #Required
+            - button.press: toggle_controller_pendant_or_esp #sends F
+            - delay: 1s #Required
+      - switch.turn_on: TM1638Led3
+  
+
+####Home Searches######################################
+#Base
+
+  - id: home_search_all_script
+    then:
+      - script.execute: make_esp_master_controller_script
+      - script.wait: make_esp_master_controller_script
+      - delay: ${home_delay}
+      - button.press: request_status_all_limit_switches_8char
+      - delay: ${home_delay}
+      - switch.turn_on: slow_speed_mode_switch
+      - delay: ${home_delay}
+      
+      - script.execute: home_search_base_script
+      - delay: ${home_delay}
+      - script.execute: home_search_shoulder_2_script  
+      
+      - script.wait: home_search_base_script
+      - script.wait: home_search_shoulder_2_script
+      
+      - delay: ${home_delay}      
+      - script.execute: home_search_3_elbow_script
+      - script.wait: home_search_3_elbow_script
+      - delay: ${home_delay}      
+      
+      - script.execute: home_search_3_wrist_pitch_script
+      - script.wait: home_search_3_wrist_pitch_script
+      - delay: ${home_delay}      
+      
+      - script.execute: home_search_4_wrist_rotate_script
+      - script.wait: home_search_4_wrist_rotate_script
+      - delay: ${home_delay}     
+      
+      - switch.turn_off: slow_speed_mode_switch
+
+  - id: home_search_base_script
+    then:
+      - repeat:
+          count: 2
+          then:
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_1
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "1M900\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_1
+                        timeout: 15s
+                  - button.press: stop_m1_base
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_1
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "1M-1800\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_1
+                        timeout: 30s
+                  - button.press: stop_m1_base
+                  - delay: 1s
+                  - uart.write: 
+                      id: uart_r
+                      data: "1M-100\r"
+                  - delay: 2s
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_1
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "1M900\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_1
+                        timeout: 15s
+                  - button.press: stop_m1_base
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay} 
+      - if:
+          condition:
+            binary_sensor.is_on: limit_switch_1
+          then:
+            - number.set:
+                id: m_1m_rotate_base
+                value: 0
+            - lambda: |-
+                id(m1_cumulative_movement_amount).publish_state(0);
+                id(m1_last_movement_amount).publish_state(0);
+            - logger.log: "Base Homed Successfully!"
+            - script.execute: home_flash_green_row
+            - script.execute: rtttl_fast_random_beeps
+            
+          else:
+            - logger.log: "Base Home Failed :("
+            - script.execute: flash_red_row_script
+            - script.execute: rtttl_alarm
+      # - switch.turn_off: slow_speed_mode_switch
+
+#Shoulder 
+  - id: home_search_shoulder_2_script
+    then:
+      - repeat:
+          count: 2
+          then:
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_2
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "2M100\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_2
+                        timeout: 2s
+                  - button.press: stop_m2_shoulder
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_2
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "2M-400\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_2
+                        timeout: 5s
+                  - button.press: stop_m2_shoulder
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_2
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "2M100\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_2
+                        timeout: 3s
+                  - button.press: stop_m2_shoulder
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay} 
+      - if:
+          condition:
+            binary_sensor.is_on: limit_switch_2
+          then:
+            - number.set:
+                id: m_2m_tilt_shoulder
+                value: 0
+            - lambda: |-
+                id(m2_cumulative_movement_amount).publish_state(0);
+                id(m2_last_movement_amount).publish_state(0);
+            - logger.log: "Shoulder Homed Successfully!"
+            - script.execute: home_flash_green_row
+            - script.execute: rtttl_fast_random_beeps
+          else:
+            - logger.log: "Shoulder Home Failed :(" 
+            - script.execute: flash_red_row_script
+            - script.execute: rtttl_alarm
+
+
+#Elbow      
+  - id: home_search_3_elbow_script
+    then:
+      - repeat:
+          count: 2
+          then:
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_3
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "3M300\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_3
+                        timeout: 10s
+                  - button.press: stop_m3_elbow
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_3
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "3M-600\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_3
+                        timeout: 20s
+                  - button.press: stop_m3_elbow
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_3
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "3M300\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_3
+                        timeout: 10s
+                  - button.press: stop_m3_elbow
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay} 
+      - if: 
+          condition:
+            binary_sensor.is_on: limit_switch_3
+          then:
+            - number.set:
+                id: m_3m_tilt_elbow
+                value: 0
+            - lambda: |-
+                id(m3_cumulative_movement_amount).publish_state(0);
+                id(m3_last_movement_amount).publish_state(0);
+            - logger.log: "Elbow Homed Successfully!"
+            - script.execute: home_flash_green_row
+            - script.execute: rtttl_fast_random_beeps
+          else:
+            - logger.log: "Elbow Home Failed :("
+            - script.execute: flash_red_row_script
+            - script.execute: rtttl_alarm
+            
+            
+#Wrist Pitch      
+  - id: home_search_3_wrist_pitch_script
+    then:
+      - repeat:
+          count: 2
+          then:
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_4
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "4M-40\r5M40\r" # Down -+
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_4
+                        timeout: 5s
+                  - button.press: stop_wrist
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_4
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "4M80\r5M-80\r" # Up +-
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_4
+                        timeout: 5s
+                  - button.press: stop_wrist
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_4
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "4M-40\r5M40\r" # Down -+
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_4
+                        timeout: 5s
+                  - button.press: stop_wrist
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay} 
+      - if: 
+          condition:
+            binary_sensor.is_on: limit_switch_4
+          then:
+            - number.set:
+                id: m_45m_pitch_wrist
+                value: 0
+            - lambda: |-
+                id(m5_cumulative_movement_amount).publish_state(0);
+                id(m5_last_movement_amount).publish_state(0);
+                id(m4_cumulative_movement_amount).publish_state(0);
+                id(m4_last_movement_amount).publish_state(0);
+            - logger.log: "Wrist Pitch Homed Successfully!"
+            - script.execute: home_flash_green_row
+            - script.execute: rtttl_fast_random_beeps
+          else:
+            - logger.log: "Wrist Pitch Home Failed :("
+            - script.execute: flash_red_row_script
+            - script.execute: rtttl_alarm
+
+#Wrist Rotate      
+  - id: home_search_4_wrist_rotate_script
+    then:
+      - repeat:
+          count: 2
+          then:
+            - if:
+                condition:
+                  binary_sensor.is_off: limit_switch_5
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "4M-1000\r5M-1000\r"
+                  - wait_until:
+                        condition:
+                          binary_sensor.is_on: limit_switch_5
+                        timeout: 15s
+                  - button.press: stop_wrist
+                  - delay: ${home_delay}
+                  - button.press: request_status_all_limit_switches_8char
+                  - delay: ${home_delay}
+      - if: 
+          condition:
+            binary_sensor.is_on: limit_switch_5
+          then:
+            - number.set:
+                id: m_45m_pitch_wrist
+                value: 0
+            - lambda: |-
+                id(m5_cumulative_movement_amount).publish_state(0);
+                id(m5_last_movement_amount).publish_state(0);
+                id(m4_cumulative_movement_amount).publish_state(0);
+                id(m4_last_movement_amount).publish_state(0);
+            - logger.log: "Wrist Rotate Homed Successfully!"
+            - script.execute: home_flash_green_row
+            - script.execute: rtttl_fast_random_beeps
+          else:
+            - logger.log: "Wrist Rotate Home Failed :("  
+            - script.execute: flash_red_row_script
+            - script.execute: rtttl_alarm
+
+  - id: someone_is_detected_script
+    then:
+      - if:
+          condition:
+            not:
+              or:
+                - script.is_running: home_search_all_script
+                - script.is_running: sussing_you_out_script
+                - script.is_running: show_off_script
+          then:
+            - repeat:
+                count: 5
+                then:
+                  - light.turn_on: led_row_4
+                  - lambda: id(screen_message).publish_state("COME...");     
+                  - delay: 300ms
+                  - lambda: id(screen_message).publish_state("...CLOSE");
+                  - light.turn_off: led_row_4   
+                  - delay: 300ms
+                  - lambda: id(screen_message).publish_state("        "); 
+                  - delay: 100ms
+
+  - id: someone_is_close_kiss_script
+    then:
+      - if: 
+          condition:
+            and:
+              - binary_sensor.is_on: auto_moves_allowed
+              - binary_sensor.is_on: robot_is_home 
+              - not:
+                  or:
+                    - script.is_running: home_search_all_script
+                    - script.is_running: sussing_you_out_script
+                    - script.is_running: show_off_script
+          then:
+            - if: 
+                condition:
+                  switch.is_off: power_control_box_switch 
+                then:
+                  - switch.turn_on: power_control_box_switch     
+            - script.wait: someone_is_detected_script
+            - repeat:
+                count: 3
+                then:
+                  - light.turn_on: led_row_5
+                  - lambda: id(screen_message).publish_state("CLOSER..");        
+                  - delay: 300ms
+                  - light.turn_off: led_row_5
+                  - lambda: id(screen_message).publish_state("        "); 
+                  - delay: 100ms
+            - switch.turn_on: rotate_retro_leds
+            - while:
+                condition:
+                  binary_sensor.is_off: ready_for_action
+                then:
+                  - lambda: id(screen_message).publish_state("STAY..");
+                  - delay: 200ms
+                  - lambda: id(screen_message).publish_state("        "); 
+                  - delay: 200ms
+            - wait_until: 
+                condition:
+                    binary_sensor.is_on: ready_for_action
+            - switch.turn_off: rotate_retro_leds
+            - lambda: id(screen_message).publish_state("SCORBY");
+            - uart.write: 
+                id: uart_r
+                data: "2M400\r3M150\r4M80\r5M-80\r"
+            - delay: 1s
+            - repeat:
+                count: 3 #Pincher three times
+                then:
+                  # - light.turn_on: led_head_torch
+                  - uart.write: 
+                      id: uart_r
+                      data: "8M-400\r" 
+                  - delay: 500ms
+                  # - light.turn_off: led_head_torch
+                  - uart.write: 
+                      id: uart_r
+                      data: "8M400\r"
+                  - delay: 500ms
+            - delay: 1s                  
+            - button.press: esp_scorbot_return_to_base_command
+            - repeat:
+                count: 10
+                then:
+                  - light.turn_on: led_row_6
+                  - lambda: id(screen_message).publish_state("HA HA..");        
+                  - delay: 200ms
+                  - light.turn_off: led_row_6
+                  - lambda: id(screen_message).publish_state("        "); 
+                  - delay: 200ms
+            - lambda: id(screen_message).publish_state("SCORBY");
+            - button.press: home_search_all_button
+            - script.wait: home_search_all_script
+            
+
+  - id: sussing_you_out_script
+    then:
+      - wait_until: 
+          condition:
+              binary_sensor.is_on: mahko_here #Mahko may be arriving too.
+          timeout: 10s 
+      - if: 
+          condition:
+            and:
+              - binary_sensor.is_on: auto_moves_allowed 
+              - binary_sensor.is_on: robot_is_home
+              - lambda: |-
+                  return id(uptime_sensor).state > 60; //Prevent triggering after reboot.              
+              - not:
+                  or:
+                    - script.is_running: home_search_all_script
+                    - script.is_running: someone_is_detected_script
+                    - script.is_running: someone_is_close_kiss_script
+                    - script.is_running: show_off_script
+          then:
+            - lambda: id(screen_message).publish_state("SUSS");
+            - if: 
+                condition: #Power on if off
+                  switch.is_off: power_control_box_switch 
+                then:
+                  - switch.turn_on: power_control_box_switch 
+            - wait_until: 
+                condition:
+                    binary_sensor.is_on: ready_for_action #wait for set-up.
+            - switch.turn_on: flash_red_row_switch
+            - uart.write: 
+                id: uart_r
+                data: "1M700\r"
+            - delay: 1s   
+            - uart.write: 
+                id: uart_r
+                data: "2M700\r"
+            - delay: 2s 
+            - uart.write: 
+                id: uart_r
+                data: "3M-300\r4M80\r5M-80\r"
+            - delay: 2s 
+            - uart.write: 
+                id: uart_r
+                data: "4M-50\r5M50\r" 
+            - delay: 1s
+            - uart.write: 
+                id: uart_r
+                data: "4M100\r5M-100\r"
+            - delay: 2s
+            - uart.write: 
+                id: uart_r
+                data: "4M-100\r5M100\r"
+            - delay: 2s
+            - uart.write: 
+                id: uart_r
+                data: "4M50\r5M-50\r"
+            - delay: 1s
+            - script.execute: rtttl_fast_random_beeps
+            - delay: 1s
+            - light.turn_on: led_head_torch
+            - repeat:
+                count: 3
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "8M-400\r" 
+                  - delay: 500ms
+                  - uart.write: 
+                      id: uart_r
+                      data: "8M400\r"
+                  - delay: 500ms
+            - light.turn_off: led_head_torch
+            - delay: 1s
+            - script.execute: rtttl_fast_random_beeps
+            - delay: 1s
+            - switch.turn_off: flash_red_row_switch 
+            - button.press: esp_scorbot_return_to_base_command 
+            - delay: 1s
+            - button.press: home_search_all_button
+            - script.wait: home_search_all_script
+            - lambda: id(screen_message).publish_state("        ");
+
+  - id: show_off_script
+    then:
+      - if: 
+          condition:
+            and:
+              - binary_sensor.is_on: auto_moves_allowed 
+              - binary_sensor.is_on: robot_is_home
+              - lambda: |-
+                  return id(uptime_sensor).state > 60; //Prevent triggering after reboot.              
+              - not:
+                  or:
+                    - script.is_running: home_search_all_script
+                    - script.is_running: someone_is_detected_script
+                    - script.is_running: someone_is_close_kiss_script
+          then:
+            - lambda: id(screen_message).publish_state("SCORBY");
+            - if: 
+                condition: #Power on if off
+                  switch.is_off: power_control_box_switch 
+                then:
+                  - switch.turn_on: power_control_box_switch 
+            - wait_until: 
+                condition:
+                    binary_sensor.is_on: ready_for_action #wait for set-up.
+            - switch.turn_on: loop_star_wars_and_lights
+            #Shoulder
+            - uart.write: 
+                id: uart_r
+                data: "2M999\r"
+            - delay: 1s
+            #Elbow            
+            - uart.write: 
+                id: uart_r
+                data: "3M-999\r"
+            - delay: 1s
+            - uart.write: 
+                id: uart_r
+                data: "4M-300\r5M300\r"
+          #Down Low
+            - delay: 5s
+            #Elbow            
+            # - uart.write: 
+                # id: uart_r
+                # data: "3M300\r"
+            # - delay: 2s
+            - uart.write: 
+                id: uart_r
+                data: "4M190\r5M-190\r"
+            - delay: 500ms
+            - uart.write: 
+                id: uart_r
+                data: "2M250\r"
+            #Home with twirl
+            - delay: 1s
+            - uart.write: 
+                id: uart_r
+                data: "4M-800\r5M-800\r"  
+            - delay: 3s
+            - button.press: esp_scorbot_return_to_base_command 
+            - delay: 6s
+            #Up high
+            - uart.write: 
+                id: uart_r
+                data: "1M-950\r2M600\r3M1150\r4M170\r5M-370\r"
+            - delay: 5s
+            - light.turn_on: led_head_torch
+            - repeat:
+                count: 3
+                then:
+                  - uart.write: 
+                      id: uart_r
+                      data: "8M-400\r" 
+                  - delay: 500ms
+                  - uart.write: 
+                      id: uart_r
+                      data: "8M400\r"
+                  - delay: 500ms
+            - light.turn_off: led_head_torch
+            - delay: 1s
+            - uart.write: 
+                id: uart_r
+                data: "2M-350\r3M-700\r"
+            - delay: 2s
+            - uart.write: 
+                id: uart_r
+                data: "1M950\r"
+            - delay: 3s
+            - light.turn_on: led_head_torch
+            - uart.write: 
+                id: uart_r
+                data: "4M-1000\r5M-1000\r" 
+            - uart.write: 
+                id: uart_r
+                data: "8M-400\r" 
+            - delay: 4s
+            - light.turn_off: led_head_torch
+            - uart.write: 
+                id: uart_r
+                data: "8M400\r"
+            - delay: 1s
+            - button.press: esp_scorbot_return_to_base_command
+            - delay: 6s
+            - uart.write: 
+                id: uart_r
+                data: "8M-400\r" 
+            - delay: 1s
+            - uart.write: 
+                id: uart_r
+                data: "8M400\r"
+            - switch.turn_off: loop_star_wars_and_lights
+            - delay: 2s
+            - button.press: home_search_all_button
+
+  
+  - id: move_to_timetraveller_script
+    then:
+      - if: 
+          condition:
+            and:
+              - binary_sensor.is_on: auto_moves_allowed 
+              - binary_sensor.is_on: robot_is_home             
+              - not:
+                  or:
+                    - script.is_running: home_search_all_script
+                    - script.is_running: someone_is_detected_script
+                    - script.is_running: someone_is_close_kiss_script
+                    - script.is_running: show_off_script
+          then:
+            - if: 
+                condition: #Power on if off
+                  switch.is_off: power_control_box_switch 
+                then:
+                  - switch.turn_on: power_control_box_switch 
+            - wait_until: 
+                condition:
+                    binary_sensor.is_on: ready_for_action #wait for set-up.
+            - uart.write: 
+                id: uart_r
+                data: "2M1200\r"
+            - delay: 2s
+            - uart.write: 
+                id: uart_r
+                data: "1M350\r3M250\r4M340\r5M-340\r"
+            # - lambda: id(robot_is_time_travelling).publish_state(true);
+            - delay: 3s
+            - light.turn_on: led_head_torch
+            - switch.turn_on: TM1638Led6
+
+  - id: go_home_from_timetraveller_script
+    then:
+      - if: 
+          condition:
+            and:
+              - binary_sensor.is_on: auto_moves_allowed             
+              - not:
+                  or:
+                    - script.is_running: home_search_all_script
+                    - script.is_running: someone_is_detected_script
+                    - script.is_running: someone_is_close_kiss_script
+                    - script.is_running: show_off_script
+          then:
+            - if: 
+                condition: #Power on if off
+                  switch.is_off: power_control_box_switch 
+                then:
+                  - switch.turn_on: power_control_box_switch 
+            - wait_until: 
+                condition:
+                    binary_sensor.is_on: ready_for_action #wait for set-up.
+            - light.turn_off: led_head_torch
+            - delay: 1s 
+            - uart.write: 
+                id: uart_r
+                data: "1M-350\r2M-1200\r3M-250\r4M-340\r5M340\r"
+            # - lambda: id(robot_is_time_travelling).publish_state(false);
+            - delay: 3s
+            - delay: 2s
+            - switch.turn_off: TM1638Led6
+            - delay: 2s
+            - button.press: home_search_all_button
+      
